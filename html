@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Medicine Reminder — Alarm Version</title>
+  <style>
+    :root{--bg:#fff8f3;--card:#fff;--accent:#ef4444;--muted:#374151}
+    *{box-sizing:border-box}
+    body{font-family:Inter, system-ui, Arial, sans-serif;background:var(--bg);margin:0;color:var(--muted)}
+    .wrap{max-width:980px;margin:28px auto;padding:18px}
+    header h1{margin:0;color:var(--accent)}
+    header p{color:#6b7280;margin-top:6px}
+    .grid{display:grid;grid-template-columns:1fr 360px;gap:16px;margin-top:18px}
+    .card{background:var(--card);padding:14px;border-radius:12px;box-shadow:0 8px 24px rgba(15,23,42,0.06)}
+    label{display:block;margin-bottom:10px}
+    input,select{width:100%;padding:10px;border-radius:8px;border:1px solid #f3e7e5;margin-top:6px}
+    button{background:var(--accent);color:white;padding:10px 12px;border-radius:10px;border:none;cursor:pointer}
+    .list{max-height:420px;overflow:auto}
+    .item{padding:10px;border-bottom:1px solid #f8eef0}
+    .small{color:#6b7280;font-size:13px}
+    footer{margin-top:14px;color:#6b7280;text-align:center}
+    @media(max-width:820px){.grid{grid-template-columns:1fr}}
+    .alarm-modal{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.45);}
+    .alarm-box{background:white;padding:20px;border-radius:12px;max-width:420px;width:92%;text-align:center}
+    .alarm-title{font-size:20px;color:var(--accent);margin-bottom:8px}
+    .control-row{display:flex;gap:8px;justify-content:center;margin-top:12px}
+    .mute-btn{background:#111;color:#fff;padding:8px 12px;border-radius:8px;border:none;cursor:pointer}
+    .enable-sound{margin-top:10px;background:#10b981}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Medicine Reminder — Alarm Version</h1>
+      <p>Browser-only reminder app. When a reminder fires it will produce a **loud repeating alarm** (up to 60 seconds) until you press <strong>STOP</strong>. Works only while the tab or browser is open. Please click <strong>Enable Sound</strong> once so the page can play alarms reliably.</p>
+    </header>
+
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
+      <button id="enableSound" class="enable-sound">Enable Sound</button>
+      <button id="reqNotif">Enable Desktop Notifications</button>
+      <div class="small" style="margin-left:8px">(Enable both for best experience.)</div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Add Reminder</h2>
+        <form id="form">
+          <label>Medicine name
+            <input id="name" required placeholder="e.g. Paracetamol">
+          </label>
+
+          <label>First time (date & time)
+            <input id="first_time" type="datetime-local" required>
+          </label>
+
+          <label>Interval (hours)
+            <input id="interval" type="number" min="0" value="24">
+          </label>
+
+          <label>How many times?
+            <input id="occurrences" type="number" min="1" value="1">
+          </label>
+
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button type="submit">Save</button>
+            <button id="demoBtn" type="button">Quick demo (30s)</button>
+            <button id="clearBtn" type="button" style="background:#6b7280">Clear all</button>
+          </div>
+
+          <p id="status" class="small"></p>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Scheduled Reminders</h2>
+        <div id="list" class="list small">Loading...</div>
+      </div>
+
+      <div class="card" style="grid-column:span 2;margin-top:12px">
+        <h2>Notifications / Alarm Log</h2>
+        <div id="notifArea" class="small">No notifications yet.</div>
+      </div>
+    </div>
+
+    <footer>Save as <code>reminder-alarm.html</code> and open in a browser. Click <strong>Enable Sound</strong> once to allow alarm to play.</footer>
+  </div>
+
+  <!-- Alarm modal (created dynamically) -->
+
+  <script>
+    // Alarm-enabled browser-only medicine reminder
+    // Uses Web Audio API to generate a loud repeating alarm tone and loops until user stops or 60s passes.
+
+    const LS_KEY = 'med_reminders_v2';
+    let reminders = [];
+
+    // Audio resources
+    let audioCtx = null;
+    let alarmOsc = null;
+    let alarmGain = null;
+    let alarmIntervalId = null;
+    let alarmStopTimeout = null;
+
+    function initAudio(){
+      if(audioCtx) return;
+      try{
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }catch(e){ console.warn('Web Audio not supported', e); }
+    }
+
+    function playAlarm(durationMs = 60000){
+      // start an oscillator that pulses/beeps for up to durationMs or until stopped
+      if(!audioCtx) initAudio();
+      if(!audioCtx) return;
+      // create oscillator and gain
+      alarmOsc = audioCtx.createOscillator();
+      alarmGain = audioCtx.createGain();
+      alarmOsc.type = 'sawtooth';
+      alarmOsc.frequency.value = 880; // A5-ish
+      alarmGain.gain.value = 0; // start silent
+      alarmOsc.connect(alarmGain);
+      alarmGain.connect(audioCtx.destination);
+      alarmOsc.start();
+
+      // pulse: ramp gain up quickly, hold, then down, repeated
+      let on = true;
+      const pulse = ()=>{
+        if(!alarmGain) return;
+        // quick attack
+        alarmGain.gain.cancelScheduledValues(audioCtx.currentTime);
+        alarmGain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+        alarmGain.gain.exponentialRampToValueAtTime(0.7, audioCtx.currentTime + 0.02);
+        // release after 700ms
+        alarmGain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.9);
+      };
+      pulse();
+      alarmIntervalId = setInterval(pulse, 1100);
+
+      // safety stop after durationMs
+      alarmStopTimeout = setTimeout(()=> stopAlarm(), durationMs);
+    }
+
+    function stopAlarm(){
+      if(alarmIntervalId){ clearInterval(alarmIntervalId); alarmIntervalId = null; }
+      if(alarmStopTimeout){ clearTimeout(alarmStopTimeout); alarmStopTimeout = null; }
+      try{
+        if(alarmGain){ alarmGain.gain.cancelScheduledValues(audioCtx.currentTime); alarmGain.gain.setValueAtTime(0.0001, audioCtx.currentTime); }
+        if(alarmOsc){ alarmOsc.stop(); alarmOsc.disconnect(); alarmOsc = null; }
+        if(alarmGain){ alarmGain.disconnect(); alarmGain = null; }
+      }catch(e){ /* ignore */ }
+      // close context? keep it open for reuse (some browsers restrict creating many contexts)
+    }
+
+    function saveReminders(){ localStorage.setItem(LS_KEY, JSON.stringify(reminders)); }
+    function loadReminders(){ try{ reminders = JSON.parse(localStorage.getItem(LS_KEY)) || []; }catch(e){ reminders = []; } }
+    function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8); }
+
+    // UI elements
+    const listEl = document.getElementById('list');
+    const notifEl = document.getElementById('notifArea');
+    const statusEl = document.getElementById('status');
+
+    function escapeHtml(s){ return s? s.replace(/[&<>\"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) : ''; }
+
+    function renderList(){
+      if(reminders.length===0){ listEl.innerHTML = '<div>No reminders.</div>'; return; }
+      listEl.innerHTML = '';
+      reminders.forEach(r => {
+        const d = document.createElement('div'); d.className='item';
+        const next = getNextOccurrence(r);
+        d.innerHTML = `<strong>${escapeHtml(r.name)}</strong><div class="small">Next: ${next? new Date(next).toLocaleString() : '—'} • Interval: ${r.interval_hours}h • Fired: ${r.firedCount||0}/${r.occurrences}</div>`;
+        const del = document.createElement('button'); del.textContent='Delete'; del.style.marginTop='8px'; del.onclick = ()=>{ if(confirm('Delete this reminder?')){ reminders = reminders.filter(x=>x.id!==r.id); saveReminders(); renderList(); } };
+        d.appendChild(del);
+        listEl.appendChild(d);
+      });
+    }
+
+    function renderNotifs(){
+      const arr = JSON.parse(sessionStorage.getItem('med_notifs_v2')||'[]');
+      if(arr.length===0){ notifEl.innerHTML = 'No notifications yet.'; return; }
+      notifEl.innerHTML = '';
+      arr.slice().reverse().forEach(n => {
+        const div = document.createElement('div'); div.className='item'; div.innerHTML = `<strong>${escapeHtml(n.text)}</strong><div class="small">${new Date(n.time).toLocaleString()}</div>`; notifEl.appendChild(div);
+      });
+    }
+
+    function pushNotif(text){
+      const arr = JSON.parse(sessionStorage.getItem('med_notifs_v2')||'[]');
+      arr.push({text, time: new Date().toISOString()});
+      sessionStorage.setItem('med_notifs_v2', JSON.stringify(arr.slice(-200)));
+      renderNotifs();
+    }
+
+    function getNextOccurrence(r){
+      const first = new Date(r.first_time_iso);
+      if(isNaN(first)) return null;
+      if(r.interval_hours==0){ if((r.firedCount||0) < r.occurrences) return first.toISOString(); return null; }
+      for(let i=0;i<r.occurrences;i++){ const occ = new Date(first.getTime() + i * r.interval_hours * 3600 * 1000); if((r.firedCount||0) <= i && occ.getTime() >= Date.now()) return occ.toISOString(); }
+      return null;
+    }
+
+    // When a reminder is due: show modal, start alarm (loop), send desktop notification
+    function fireReminder(r, occIndex, occDate){
+      const text = `Time to take: ${r.name} (scheduled ${occDate.toLocaleString()})`;
+      pushNotif(text);
+      // start alarm
+      playAlarm(60000); // alarm will auto-stop after 60s
+      // desktop notification
+      if(window.Notification && Notification.permission==='granted'){
+        try{ new Notification('Medicine Reminder — Alarm', {body: text, silent: true}); }catch(e){}
+      }
+      // show modal with stop button
+      showAlarmModal(text);
+      // mark fired
+      const firedKey = `fired_v2_${r.id}_${occIndex}`;
+      sessionStorage.setItem(firedKey, new Date().toISOString());
+      r.firedCount = (r.firedCount||0) + 1;
+      saveReminders(); renderList();
+    }
+
+    // Modal
+    let modalEl = null;
+    function showAlarmModal(text){
+      if(modalEl) return; // already showing
+      modalEl = document.createElement('div'); modalEl.className='alarm-modal';
+      const box = document.createElement('div'); box.className='alarm-box';
+      box.innerHTML = `<div class="alarm-title">ALARM — Reminder</div><div style="font-size:16px">${escapeHtml(text)}</div>`;
+      const controls = document.createElement('div'); controls.className='control-row';
+      const stopBtn = document.createElement('button'); stopBtn.textContent='STOP'; stopBtn.onclick = ()=>{ closeAlarmModal(); stopAlarm(); };
+      stopBtn.style.background = 'var(--accent)'; stopBtn.style.color='white'; stopBtn.style.padding='10px 14px'; stopBtn.style.borderRadius='8px'; stopBtn.style.border='none';
+      const snoozeBtn = document.createElement('button'); snoozeBtn.textContent='SNOOZE 1 min'; snoozeBtn.onclick = ()=>{ closeAlarmModal(); stopAlarm(); snoozeOnce(text); };
+      snoozeBtn.style.background='#f59e0b'; snoozeBtn.style.color='white'; snoozeBtn.style.padding='10px 14px'; snoozeBtn.style.borderRadius='8px'; snoozeBtn.style.border='none';
+      controls.appendChild(stopBtn); controls.appendChild(snoozeBtn);
+      box.appendChild(controls);
+      modalEl.appendChild(box);
+      document.body.appendChild(modalEl);
+    }
+    function closeAlarmModal(){ if(modalEl){ document.body.removeChild(modalEl); modalEl=null; } }
+
+    function snoozeOnce(text){
+      // schedule a single beep in 1 minute using setTimeout (works only if tab open)
+      setTimeout(()=>{
+        // lightweight re-show: play shorter alarm
+        playAlarm(30000); // 30s
+        showAlarmModal(text + ' (snooze)');
+        // push notif
+        pushNotif(text + ' (snooze)');
+      }, 60*1000);
+    }
+
+    // Check reminders every 2 seconds
+    function checkReminders(){
+      const now = Date.now();
+      reminders.forEach(r=>{
+        const first = new Date(r.first_time_iso);
+        for(let i=0;i<r.occurrences;i++){
+          const occ = new Date(first.getTime() + i * r.interval_hours * 3600 * 1000);
+          const firedKey = `fired_v2_${r.id}_${i}`;
+          if(!sessionStorage.getItem(firedKey) && occ.getTime() <= now){
+            fireReminder(r,i,occ);
+          }
+        }
+      });
+    }
+
+    // Form handling
+    document.getElementById('form').addEventListener('submit', e=>{
+      e.preventDefault();
+      const name = document.getElementById('name').value.trim();
+      const first_time = document.getElementById('first_time').value;
+      const interval = parseInt(document.getElementById('interval').value,10) || 0;
+      const occ = parseInt(document.getElementById('occurrences').value,10) || 1;
+      if(!name || !first_time){ statusEl.textContent = 'Please fill name and first time.'; return; }
+      const r = { id: uid(), name, first_time_iso: new Date(first_time).toISOString(), interval_hours: interval, occurrences: occ, firedCount: 0 };
+      reminders.push(r); saveReminders(); renderList(); statusEl.textContent = 'Saved!'; setTimeout(()=>statusEl.textContent='',3000);
+    });
+
+    document.getElementById('demoBtn').addEventListener('click', ()=>{
+      const now = new Date(Date.now() + 30*1000);
+      const y = now.getFullYear(); const m = String(now.getMonth()+1).padStart(2,'0'); const d = String(now.getDate()).padStart(2,'0'); const hh = String(now.getHours()).padStart(2,'0'); const mm = String(now.getMinutes()).padStart(2,'0');
+      document.getElementById('name').value = 'Demo Pill';
+      document.getElementById('first_time').value = `${y}-${m}-${d}T${hh}:${mm}`;
+      document.getElementById('interval').value = '0';
+      document.getElementById('occurrences').value = '1';
+      setTimeout(()=>document.getElementById('form').dispatchEvent(new Event('submit')),100);
+      statusEl.textContent = 'Demo reminder set for ~30 seconds from now.';
+      setTimeout(()=>statusEl.textContent='',4000);
+    });
+
+    document.getElementById('clearBtn').addEventListener('click', ()=>{
+      if(confirm('Delete all reminders and logs?')){ reminders=[]; saveReminders(); sessionStorage.clear(); renderList(); renderNotifs(); }
+    });
+
+    // Enable sound button
+    document.getElementById('enableSound').addEventListener('click', ()=>{
+      initAudio();
+      // create a short silent buffer/resume context to satisfy browser gesture requirement
+      if(audioCtx && audioCtx.state === 'suspended'){
+        audioCtx.resume().then(()=>{ pushNotif('Sound enabled'); statusEl.textContent = 'Sound enabled'; setTimeout(()=>statusEl.textContent='',2000); }).catch(()=>{});
+      } else { pushNotif('Sound enabled'); statusEl.textContent = 'Sound enabled'; setTimeout(()=>statusEl.textContent='',2000); }
+    });
+
+    // Request notification permission
+    document.getElementById('reqNotif').addEventListener('click', ()=>{
+      if(!('Notification' in window)){ alert('Notifications not supported by this browser.'); return; }
+      Notification.requestPermission().then(p=>{ if(p==='granted') pushNotif('Desktop notifications enabled'); else alert('Permission: '+p); });
+    });
+
+    function renderNotifs(){ const arr = JSON.parse(sessionStorage.getItem('med_notifs_v2')||'[]'); if(arr.length===0){ notifEl.innerHTML = 'No notifications yet.'; return; } notifEl.innerHTML=''; arr.slice().reverse().forEach(n=>{ const div = document.createElement('div'); div.className='item'; div.innerHTML=`<strong>${escapeHtml(n.text)}</strong><div class="small">${new Date(n.time).toLocaleString()}</div>`; notifEl.appendChild(div); }); }
+
+    // Init
+    window.addEventListener('load', ()=>{
+      loadReminders(); renderList(); renderNotifs();
+      if(window.Notification && Notification.permission === 'default'){
+        // leave to user control (button)
+      }
+      setInterval(checkReminders, 2000);
+    });
+  </script>
+</body>
+</html>
